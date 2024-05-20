@@ -1,0 +1,51 @@
+{
+	"name": "rl_ws",
+	"build": {
+		// Sets the run context to one level up instead of the .devcontainer folder.
+		"context": "..",
+		// Update the 'dockerFile' property if you aren't using the standard 'Dockerfile' filename.
+		"dockerfile": "./Dockerfile",
+		"options": [
+			"--network=host"
+		],
+		"args": {
+			"HTTP_PROXY": "http://127.0.0.1:8888",
+			"HTTPS_PROXY": "http://127.0.0.1:8888"
+		}
+	},
+
+	"runArgs": ["--privileged", "--network=host", "--device=/dev/dri:/dev/dri", "--group-add=video", "--name=rl_ws", "--dns=127.0.0.53", "--ipc=host", "--gpus=all"],
+	
+	"containerEnv": {
+		"DISPLAY": "${localEnv:DISPLAY}",
+		"QT_X11_NO_MITSHM": "1",
+		"QT_GRAPHICSSYSTEM=": "native"
+	},
+
+	"mounts": [
+		{
+		"source": "/tmp/.X11-unix", 
+		"target":"/tmp/.X11-unix", 
+		"type": "bind"
+			}, 
+		{
+		"source": "/dev",
+		"target": "/dev",
+		"type": "bind"
+			}],
+	
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python",
+				"ms-vscode.cpptools",
+				"ms-vscode.cpptools-extension-pack",
+				"ms-vscode.cmake-tools",
+				"Gruntfuggly.todo-tree",
+				"donjayamanne.githistory",
+				"vsciot-vscode.vscode-arduino",
+				"oderwat.indent-rainbow"
+			]
+			}
+		}
+}
