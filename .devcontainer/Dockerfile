@@ -20,5 +20,6 @@ RUN pip install mujoco gymnasium mujoco-py
 RUN apt update && apt-get install cmake libopenmpi-dev python3-dev zlib1g-dev -y
 RUN apt-get install python3-tk -y
 RUN pip install torch_geometric
+RUN ldconfig
 
 WORKDIR /root
