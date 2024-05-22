@@ -157,7 +157,7 @@ class Critic(nn.Module):
             value = torch.squeeze(self._critic_net(obs), -1)
         return value
 
-class TRPO(object):
+class PPO(object):
     
     def __init__(self, env: Env, log_std: float, act_net: nn.Module, critic_net: nn.Module, policy_lr: float, value_lr: float, clip_thresh: float, device: str) -> None:
         
@@ -222,6 +222,7 @@ class TRPO(object):
         self, 
         epochs: int, 
         value_iters: int,
+        policy_iters: int,
         traj_num_per_epoch: int, 
         max_step: int,
         gamma: float,
@@ -275,13 +276,14 @@ class TRPO(object):
                 old_log_prob = old_log_prob.to(self._device)
             
             # optimize policy network
-            self._policy_optimizer.zero_grad()
-            log_prob = self._policy_net(obs, act)
-            ratio = torch.exp(log_prob - old_log_prob)
-            clipped_adv = torch.clamp(ratio, 1-self._clip_thresh, 1+self._clip_thresh) * adv
-            policy_loss = - torch.min(clipped_adv, ratio * adv).mean()
-            policy_loss.backward()
-            self._policy_optimizer.step()
+            for _ in range(policy_iters):
+                self._policy_optimizer.zero_grad()
+                log_prob = self._policy_net(obs, act)
+                ratio = torch.exp(log_prob - old_log_prob)
+                clipped_adv = torch.clamp(ratio, 1-self._clip_thresh, 1+self._clip_thresh) * adv
+                policy_loss = - torch.min(clipped_adv, ratio * adv).mean()
+                policy_loss.backward()
+                self._policy_optimizer.step()
             
             # optimize value network
             for _ in range(value_iters):
@@ -332,7 +334,7 @@ class MLP(nn.Module):
 
 if __name__ == "__main__":
     
-    vpg = TRPO(
+    ppo = PPO(
         env=lambda render: gymnasium.make("Pendulum-v1", render_mode=("human" if render else None)),
         log_std=0.1,
         act_net=MLP(3, [30, 30, 30], 1),
@@ -343,4 +345,4 @@ if __name__ == "__main__":
         device='cuda'
         )
     
-    vpg.train(140, 20, 100, 1000, 0.99)
+    ppo.train(140, 20, 20, 100, 1000, 0.99)
