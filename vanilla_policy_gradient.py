@@ -6,7 +6,7 @@ from torch import nn
 from torch.distributions import Distribution
 from torch.distributions.normal import Normal
 from torch.distributions.categorical import Categorical
-from typing import Tuple
+from typing import Tuple, List
 from torch.optim import Adam
 import numpy as np
 
@@ -62,11 +62,14 @@ class TrajBuffer(object):
     
     def get(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         
+        adv = np.concatenate(self._adv, axis=0)
+        adv -= adv.mean()
+        
         return (
             torch.as_tensor(np.concatenate(self._obs, axis=0)),
             torch.as_tensor(np.concatenate(self._act, axis=0)),
             torch.as_tensor(np.concatenate(self._rtg, axis=0)),
-            torch.as_tensor(np.concatenate(self._adv, axis=0)),
+            torch.as_tensor(adv),
             )
 
 class Actor(nn.Module):
@@ -149,12 +152,14 @@ class Critic(nn.Module):
 
 class VPG(object):
     
-    def __init__(self, env: Env, log_std: float, act_net: nn.Module, critic_net: nn.Module, policy_lr: float, value_lr: float) -> None:
+    def __init__(self, env: Env, log_std: float, act_net: nn.Module, critic_net: nn.Module, policy_lr: float, value_lr: float, device: str) -> None:
         
-        self._env = env
+        self._env_fn = env
+        
+        self._env = self._env_fn(render = False)
         
         if isinstance(self._env.action_space, Box):
-            self._policy_net = GaussianActor(env.action_space.shape[0], log_std, act_net)
+            self._policy_net = GaussianActor(self._env.action_space.shape[0], log_std, act_net)
         elif isinstance(self._env.action_space, Discrete):
             self._policy_net = CategoricalActor(act_net)
         else:
@@ -166,6 +171,42 @@ class VPG(object):
         
         self._policy_optimizer = Adam(self._policy_net.parameters(), lr=policy_lr)
         self._value_optimizer = Adam(self._value_net.parameters(), lr=value_lr)
+        self._device = device
+    
+    def eval(
+        self,
+        epochs: int,
+        max_step: int
+    ) -> None:
+        
+        eval_env = self._env_fn(render = True)
+        
+        epoch_reward = 0.0
+        
+        for i in range(epochs):
+            
+            obs, _ = eval_env.reset()
+            
+            done = False
+            
+            time_step = 0
+            traj_reward = 0.0
+            
+            while not done and time_step < max_step:
+                act = self._policy_net.step(torch.tensor(obs, dtype=torch.float32))
+                obs, reward, terminated, truncated, _ = eval_env.step(act.numpy())
+                
+                done = terminated or truncated
+                
+                time_step += 1
+                
+                traj_reward += reward
+            
+            epoch_reward += traj_reward
+        
+        print("reward:", epoch_reward / epochs)
+
+        eval_env.close()
     
     def train(
         self, 
@@ -173,7 +214,8 @@ class VPG(object):
         value_iters: int,
         traj_num_per_epoch: int, 
         max_step: int,
-        gamma: float
+        gamma: float,
+        eval_freq: int = 20
     ):
         for k in range(epochs):
             
@@ -198,7 +240,7 @@ class VPG(object):
                     
                     done = terminated or truncated
                     
-                    traj.append(obs, act, reward, value.numpy())
+                    traj.append(obs, act.numpy(), reward, value.numpy())
                     
                     obs = new_obs
                     
@@ -211,6 +253,15 @@ class VPG(object):
                 self._traj_buffer.append(*traj.finish_traj(gamma))
             
             obs, act, rtg, adv = self._traj_buffer.get()
+            
+            # optimization
+            if not self._device == 'cpu':
+                self._policy_net.to(self._device)
+                self._value_net.to(self._device)
+                obs = obs.to(self._device)
+                act = act.to(self._device)
+                rtg = rtg.to(self._device)
+                adv = adv.to(self._device)
             
             # optimize policy network
             self._policy_optimizer.zero_grad()
@@ -227,36 +278,55 @@ class VPG(object):
                 value_loss.backward()
                 self._value_optimizer.step()
             
+            if not self._device == 'cpu':
+                self._policy_net.to('cpu')
+                self._value_net.to('cpu')
+            
             print("reward:", epoch_reward / traj_num_per_epoch, "progress:", k / epochs * 100.0, "%")
+
+            if (k + 1) % eval_freq == 0:
+                self.eval(1, max_step)
         
         self._env.close()
 
 class MLP(nn.Module):
     
-    def __init__(self, input_size, hidden_size, output_size):
+    def __init__(self, input_size, hidden_size: List[int], output_size):
         
         super(MLP, self).__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_size, output_size)
+        self.fc1 = nn.Linear(input_size, hidden_size[0])
+        self.relu1 = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size[0], hidden_size[1])
+        self.relu2 = nn.ReLU()
+        self.fc3 = nn.Linear(hidden_size[1], hidden_size[2])
+        self.relu3 = nn.ReLU()
+        self.fc4 = nn.Linear(hidden_size[2], output_size)
+        self.tanh = nn.Tanh()
         
     def forward(self, x):
         
         x = self.fc1(x)
-        x = self.relu(x)
+        x = self.relu1(x)
         x = self.fc2(x)
+        x = self.relu2(x)
+        x = self.fc3(x)
+        x = self.relu3(x)
+        x = self.fc4(x)
+        x = torch.nn.Parameter(torch.tensor(2, dtype=torch.float32)) * self.tanh(x)
+        
         return x
 
 
 if __name__ == "__main__":
     
     vpg = VPG(
-        env=gymnasium.make('CartPole-v1'),
-        log_std=0.5,
-        act_net=MLP(4, 20, 2),
-        critic_net=MLP(4, 20, 1),
-        policy_lr=0.01,
-        value_lr=0.01
+        env=lambda render: gymnasium.make("Pendulum-v1", render_mode=("human" if render else None)),
+        log_std=0.1,
+        act_net=MLP(3, [30, 30, 30], 1),
+        critic_net=MLP(3, [30, 30, 30], 1),
+        policy_lr=0.005,
+        value_lr=0.005,
+        device='cuda'
         )
     
-    vpg.train(100, 100, 50, 1000, 0.99)
+    vpg.train(140, 20, 100, 1000, 0.99)
