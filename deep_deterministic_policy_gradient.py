@@ -13,38 +13,53 @@ import numpy as np
 
 class ReplayBuffer(object):
     
-    def __init__(self):
-        self._obs = []
-        self._act = []
-        self._rew = []
-        self._next_obs = []
-        self._done = []
+    def __init__(self, size: int, reward_scale: float, obs_dim: int, act_dim: int):
+        
+        self._buffer_size = size
+        self._reward_scale = reward_scale
+        
+        self._obs = np.zeros([self._buffer_size, obs_dim], dtype=np.float32)
+        self._act = np.zeros([self._buffer_size, act_dim], dtype=np.float32)
+        self._next_obs = np.zeros([self._buffer_size, obs_dim], dtype=np.float32)
+        self._rew = np.zeros(self._buffer_size, dtype=np.float32)
+        self._done = np.zeros(self._buffer_size, dtype=np.float32)
+        
+        self._ptr = 0
+        self._full = False
     
-    def sample(self, num: int):
-        # this runs too slow, but i don't want to optimize
-        num = len(self._obs) if num > len(self._obs) else num
-        inds = np.random.permutation(len(self._obs))[0:num]
+    def sample(self, batch: int):
+        
+        if self._full:
+            inds = np.random.randint(0, self._buffer_size, batch)
+        else:
+            inds = np.random.randint(0, self._ptr, batch)
+
         return (
-            torch.tensor(np.array(self._obs, dtype=np.float32)[inds]),
-            torch.tensor(np.array(self._act, dtype=np.float32)[inds]),
-            torch.tensor(np.array(self._rew, dtype=np.float32)[inds]),
-            torch.tensor(np.array(self._next_obs, dtype=np.float32)[inds]),
-            torch.tensor(np.array(self._done, dtype=np.float32)[inds]),
+            torch.tensor(self._obs[inds]),
+            torch.tensor(self._act[inds]),
+            torch.tensor(self._rew[inds]),
+            torch.tensor(self._next_obs[inds]),
+            torch.tensor(self._done[inds]),
         )
     
     def append(self, obs, act, rew, next_obs, done):
-        self._obs.append(obs)
-        self._act.append(act)
-        self._rew.append(rew / 500.0)
-        self._next_obs.append(next_obs)
-        self._done.append(done)
+        
+        self._obs[self._ptr] = obs
+        self._act[self._ptr] = act
+        self._rew[self._ptr] = self._reward_scale * rew
+        self._next_obs[self._ptr] = next_obs
+        self._done[self._ptr] = done
+        
+        self._ptr += 1
+        
+        if self._ptr == self._buffer_size:
+            self._ptr = 0
+            self._full = True
 
     def reset(self):
-        self._obs.clear()
-        self._act.clear()
-        self._rew.clear()
-        self._next_obs.clear()
-        self._done.clear()
+        
+        self._ptr = 0
+        self._full = False
 
 class ActorMLP(nn.Module):
     
@@ -120,7 +135,7 @@ class Critic(nn.Module):
 
 class DDPG(object):
     
-    def __init__(self, env: Env, actor_hidden: List[int], critic_hidden: List[int], policy_lr: float, value_lr: float, device: str) -> None:
+    def __init__(self, env: Env, actor_hidden: List[int], critic_hidden: List[int], policy_lr: float, value_lr: float, buffer_size: int, reward_scale: float,device: str) -> None:
         """
         the action and observation should both be normalized to [-1, 1]
         """
@@ -142,7 +157,7 @@ class DDPG(object):
         self._mu_target.load_state_dict(self._mu_net.state_dict())
         self._q_target.load_state_dict(self._q_net.state_dict())
         
-        self._replay_buffer = ReplayBuffer()
+        self._replay_buffer = ReplayBuffer(buffer_size, reward_scale, self._obs_dim, self._act_dim)
         
         self._mu_optimizer = Adam(self._mu_net.parameters(), lr=policy_lr)
         self._q_optimizer = Adam(self._q_net.parameters(), lr=value_lr)
@@ -206,31 +221,35 @@ class DDPG(object):
     
     def train(
         self, 
-        timesteps: int = 5000000,
-        update_period: int = 50000, # how many epoch per update round
-        update_num: int = 20, # how many update per update round
+        timesteps: int = 500000,
+        update_period: int = 2000, # how many epoch per update round
+        update_num: int = 1000, # how many update per update round
         sample_num: int = 128,
-        start_after: int = 10000,
-        rho = 0.6,
+        start_after: int = 200000,
+        warm_up_timesteps: int = 20000,
+        rho = 0.995,
         explore_sigma: float = 0.3,
         gamma: float = 0.99,
-        eval_freq: int = 100000,
-        max_step: int = 50000
+        eval_freq: int = 40000,
+        max_step: int = 200
     ):
         self._replay_buffer.reset()
         
         obs, _ = self._env.reset()
         
         for k in range(timesteps):
+            if k >= warm_up_timesteps:
+                with torch.no_grad():
+                    act = torch.clamp(self._mu_net(torch.tensor(obs, dtype=torch.float32)) + np.random.randn(self._act_dim) * explore_sigma, -1.0, 1.0)
+                    act = act.numpy()
+            else:
+                act = (np.random.rand(self._act_dim) - 0.5) * 2.0
             
-            with torch.no_grad():
-                act = np.clip(self._mu_net(torch.tensor(obs, dtype=torch.float32)) + np.random.randn(self._act_dim) * explore_sigma, -1.0, 1.0)
-            
-            next_obs, reward, terminated, truncated, _ = self._env.step(act.numpy())
+            next_obs, reward, terminated, truncated, _ = self._env.step(act)
             
             done = terminated or truncated
             
-            self._replay_buffer.append(obs, act.numpy(), reward, next_obs, done)
+            self._replay_buffer.append(obs, act, reward, next_obs, done)
             
             obs = next_obs
             
@@ -245,25 +264,10 @@ class DDPG(object):
                     
                     with torch.no_grad():
                         targets = rews + gamma * (1 - dones) * self._q_target(next_obss, self._mu_target(next_obss))
-                        # print(targets.max())
                         
-                    # print(targets[0])
-                    
-                    # print(list(self._q_net.parameters())[-1][0])
-                    # print(list(self._mu_net.parameters())[-1][0])
-                    
-                    # with torch.no_grad():
-                    #     print(self._q_net(obss, acts) - targets)
-                    
-                    # optimize q
                     self._q_optimizer.zero_grad()
                     q_loss = ((self._q_net(obss, acts) - targets) ** 2).mean()
-                    q_loss.backward()
-                    # for name, param in self._q_net.named_parameters():
-                    #     if param.grad is not None:
-                    #         print(f"Gradient for {name}: {param.grad}")
-                    # exit(0)
-                    
+                    q_loss.backward()                    
                     self._q_optimizer.step()
                     
                     # optimize mu
@@ -320,7 +324,7 @@ class DDPG(object):
             
             # print("reward:", epoch_reward / traj_num_per_epoch, "progress:", k / epochs * 100.0, "%")
 
-            if (k + 1) % eval_freq == 0:
+            if (k + 1) % eval_freq == 0 and k > start_after:
                 self.eval(15, max_step)
             
             if k % (timesteps // 100) == 0:
@@ -355,6 +359,8 @@ if __name__ == "__main__":
         critic_hidden=[40, 40, 40],
         policy_lr=0.01,
         value_lr=0.01,
+        buffer_size=int(1e6),
+        reward_scale=0.01,
         device='cpu'
         )
     
