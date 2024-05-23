@@ -164,7 +164,7 @@ class TD3(object):
         self._replay_buffer = ReplayBuffer(int(buffer_size), reward_scale, self._obs_dim, self._act_dim)
         
         self._mu_optimizer = Adam(self._mu_net.parameters(), lr=policy_lr)
-        self._q_optimizer = Adam(itertools.chain(self._q1_net.parameters(), self._q1_net.parameters()), lr=value_lr)
+        self._q_optimizer = Adam(itertools.chain(self._q1_net.parameters(), self._q2_net.parameters()), lr=value_lr)
         
         self._device = device
         
@@ -262,8 +262,6 @@ class TD3(object):
             if (k + 1) % update_period == 0 and k > start_after:
                 
                 for i in range(update_num):
-                    
-                    print(i / update_num)
                 
                     obss, acts, rews, next_obss, dones = self._replay_buffer.sample(batch_size)
                     
