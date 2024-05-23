@@ -8,4 +8,4 @@ The implemented algorithms are as follows:
 - proximal policy optimization (PPO)
 - deep deterministic policy gradient (DDPG)
 - twin delayed DDPG (TD3)
-- updating...
+- soft actor critic (SAC)
